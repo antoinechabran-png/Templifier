@@ -33,7 +33,7 @@ if uploaded_file is not None:
     else:
         df = pd.read_csv(uploaded_file, header=None)
 
-    # Pre-clean the whole dataframe for spaces
+    # Pre-clean Column names and metrics for consistency (remove leading/trailing spaces)
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
 
@@ -57,15 +57,15 @@ if uploaded_file is not None:
     )
     show_sig = st.sidebar.checkbox("Show Significance/Delta Columns", value=True)
 
-    # --- MAIN UI ---
+    # --- MAIN UI: QUESTION & CATEGORIZED METRICS ---
     st.subheader("Step 1: Filter Questions and Metric Groups")
     
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
     
+    # Logic to build the Question Map
     ui_q_map = {}
     for q_full in raw_data_area[0].unique():
         if q_full in ["nan", "None", ""]: continue
-        
         display_name = get_question_root(q_full) if regroup_mode else q_full
         metrics_for_this_q = df[df[0] == q_full][1].unique().tolist()
         
@@ -75,34 +75,61 @@ if uploaded_file is not None:
             ui_q_map[display_name]["originals"].append(q_full)
             ui_q_map[display_name]["metrics"].update(metrics_for_this_q)
 
+    # Dict to store the FINAL selection for processing
     selected_q_metrics = {} 
 
     for display_q, data in ui_q_map.items():
         with st.expander(f"❓ {display_q}", expanded=False):
-            metrics_list = sorted([str(m).strip() for m in data["metrics"] if pd.notna(m)])
+            # Sort metrics and separate them
+            metrics_list = sorted([str(m) for m in data["metrics"] if pd.notna(m)])
             gen_group = [m for m in metrics_list if m in GENERAL_METRICS]
             mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
 
             col_q, col_gen, col_mod = st.columns([1, 2, 2])
             with col_q:
-                is_q_active = st.checkbox("Keep Question/Group", value=True, key=f"active_{display_q}")
+                is_q_active = st.checkbox("Keep Group", value=True, key=f"active_{display_q}")
 
             if is_q_active:
+                # Keys for multiselect persistence
+                m_gen_key = f"ms_gen_{display_q}"
+                m_mod_key = f"ms_mod_{display_q}"
+                
+                # Initialize session state if first time
+                if m_gen_key not in st.session_state: st.session_state[m_gen_key] = gen_group
+                if m_mod_key not in st.session_state: st.session_state[m_mod_key] = mod_group
+
+                # GENERAL METRICS COLUMN
                 with col_gen:
                     st.markdown("**General Metrics**")
-                    all_gen = st.checkbox("All General", value=True, key=f"all_gen_{display_q}")
-                    sel_gen = st.multiselect("Pick", gen_group, default=gen_group if all_gen else [], key=f"sel_gen_{display_q}")
+                    b1, b2 = st.columns(2)
+                    if b1.button("Select All", key=f"all_gen_btn_{display_q}"):
+                        st.session_state[m_gen_key] = gen_group
+                        st.rerun()
+                    if b2.button("Unselect All", key=f"clr_gen_btn_{display_q}"):
+                        st.session_state[m_gen_key] = []
+                        st.rerun()
+                    
+                    sel_gen = st.multiselect("Pick General", gen_group, key=m_gen_key)
+
+                # MODALITIES COLUMN
                 with col_mod:
                     st.markdown("**Answer Modalities**")
-                    all_mod = st.checkbox("All Modalities", value=True, key=f"all_mod_{display_q}")
-                    sel_mod = st.multiselect("Pick", mod_group, default=mod_group if all_mod else [], key=f"sel_mod_{display_q}")
+                    b1, b2 = st.columns(2)
+                    if b1.button("Select All", key=f"all_mod_btn_{display_q}"):
+                        st.session_state[m_mod_key] = mod_group
+                        st.rerun()
+                    if b2.button("Unselect All", key=f"clr_mod_btn_{display_q}"):
+                        st.session_state[m_mod_key] = []
+                        st.rerun()
+                        
+                    sel_mod = st.multiselect("Pick Modalities", mod_group, key=m_mod_key)
                 
-                # Combine choices and assign to every sub-attribute
-                final_selection = set(sel_gen + sel_mod)
+                # Assign the combined set to every original attribute name in the group
+                combined_selection = set(sel_gen + sel_mod)
                 for orig in data["originals"]:
-                    selected_q_metrics[orig] = final_selection
+                    selected_q_metrics[orig] = combined_selection
 
-    # --- FINAL PROCESSING ---
+    # --- PROCESSING ---
     if st.button("🚀 Generate Templated Excel", type="primary"):
         header_rows = df.iloc[:5]
         data_rows = df.iloc[5:]
@@ -112,22 +139,23 @@ if uploaded_file is not None:
             q_name = str(row[0]).strip()
             m_name = str(row[1]).strip()
             
-            # THE FIX: We check if the question label is active AND if this specific metric was selected
+            # THE FILTER: Only keep if the question is active AND the specific metric was kept in the multiselect
             if q_name in selected_q_metrics:
                 if m_name in selected_q_metrics[q_name]:
                     valid_rows_list.append(row)
         
         if not valid_rows_list:
-            st.error("No data found for current selection.")
+            st.error("No data found for selection. Ensure you haven't unselected everything.")
         else:
             filtered_data = pd.DataFrame(valid_rows_list)
             
-            # Column Filtering
+            # Define columns to keep
             cols_to_keep = [0, 1, 2]
             if show_sig: cols_to_keep.append(3)
             for p_name, indices in product_triplets.items():
                 if p_name in selected_products:
-                    if show_sig: cols_to_keep.extend(indices)
+                    if show_sig:
+                        cols_to_keep.extend(indices)
                     else:
                         cols_to_keep.append(indices[0]) # Value
                         cols_to_keep.append(indices[2]) # Base
@@ -135,25 +163,25 @@ if uploaded_file is not None:
             final_df = pd.concat([header_rows, filtered_data]).reset_index(drop=True)
             final_df = final_df[cols_to_keep]
 
-            # --- EXCEL EXPORT ---
+            # --- EXPORT TO EXCEL ---
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 final_df.to_excel(writer, index=False, header=False, sheet_name='Final_Report')
                 workbook = writer.book
                 worksheet = writer.sheets['Final_Report']
                 
-                # Formats
-                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center'})
+                # FORMATS
+                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
                 merge_fmt = workbook.add_format({'valign': 'vcenter', 'align': 'left', 'border': 1, 'text_wrap': True})
                 percent_fmt = workbook.add_format({'num_format': '0%', 'border': 1})
-                std_fmt = workbook.add_format({'border': 1})
+                standard_fmt = workbook.add_format({'border': 1})
 
-                # Formatting logic
+                # 1. Headers
                 for col_num in range(len(final_df.columns)):
                     val = final_df.iloc[2, col_num]
                     if pd.notna(val): worksheet.write(2, col_num, val, header_fmt)
 
-                # Merge Column A
+                # 2. Merge Column A
                 start_row = 5
                 row_count = len(final_df)
                 if row_count > 5:
@@ -167,13 +195,18 @@ if uploaded_file is not None:
                     if row_count - 1 > start_row: worksheet.merge_range(start_row, 0, row_count - 1, 0, current_q, merge_fmt)
                     else: worksheet.write(start_row, 0, current_q, merge_fmt)
 
-                # Numeric Formatting
+                # 3. Numeric Formatting
                 for r in range(5, row_count):
                     m_type = str(final_df.iloc[r, 1])
                     for c in range(1, len(final_df.columns)):
                         val = final_df.iloc[r, c]
-                        fmt = percent_fmt if (m_type not in GENERAL_METRICS and isinstance(val, (int, float))) else std_fmt
+                        fmt = percent_fmt if (m_type not in GENERAL_METRICS and isinstance(val, (int, float))) else standard_fmt
                         worksheet.write(r, c, val if pd.notna(val) else "", fmt)
 
-            st.success("✅ Cleaned file ready!")
-            st.download_button(label="📥 Download Excel", data=output.getvalue(), file_name=f"Cleaned_{sheet_name}.xlsx")
+            st.success("✅ Success! Filtered Excel generated.")
+            st.download_button(
+                label="📥 Download Excel File",
+                data=output.getvalue(),
+                file_name=f"Templated_{sheet_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
