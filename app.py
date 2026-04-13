@@ -14,7 +14,6 @@ PASTELS = ['#E3F2FD', '#F3E5F5', '#E8F5E9', '#FFF3E0', '#FCE4EC'] # Soft Blue, P
 SOFT_BORDER = '#B0BEC5' # Muted blue-grey
 
 def get_question_root(q_text):
-    # Extracts the "Q-03" or "S-01" part from "Q-03- Overall Likeness"
     match = re.match(r"^(Q-\d+|S-\d+)", str(q_text))
     return match.group(1) if match else str(q_text)
 
@@ -26,16 +25,24 @@ if uploaded_file is not None:
     # --- 1. SETTINGS & LOADING ---
     wb = openpyxl.load_workbook(uploaded_file, data_only=True)
     sheet_names = wb.sheetnames
-    selected_sheet = st.selectbox("Select the sheet to process", sheet_names)
+    selected_sheet = st.selectbox("Select the main sheet to process", sheet_names)
     ws = wb[selected_sheet]
     
-    # Sidebar Settings
+    # Delta Integration Settings
+    st.sidebar.header("Integration Settings")
+    use_deltas = st.sidebar.toggle("Enable Delta Integration", value=False)
+    df_delta = None
+    if use_deltas:
+        delta_sheet_name = st.sidebar.selectbox("Select the Delta sheet", sheet_names)
+        df_delta = pd.DataFrame(wb[delta_sheet_name].values)
+
+    # Sidebar Data Structure Settings
     num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 2)
     bench_start_col = 2
     product_start_col = bench_start_col + (num_benchmarks * 2)
     cols_per_product = 2 + num_benchmarks
 
-    # Load data into DataFrame
+    # Load main data into DataFrame
     df = pd.DataFrame(ws.values)
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
@@ -107,7 +114,7 @@ if uploaded_file is not None:
                 for orig in data["originals"]:
                     selected_q_metrics[orig] = set(sel_gen + sel_mod)
 
-    # --- 3. EXPORT WITH BEAUTIFUL LAYOUT ---
+    # --- 3. EXPORT WITH DELTA INTEGRATION ---
     if st.button("🚀 Generate Beautiful Excel"):
         data_rows = []
         for idx, row in df.iloc[5:].iterrows():
@@ -129,7 +136,24 @@ if uploaded_file is not None:
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                final_rows = [df.iloc[i] for i in range(5)] + [r[1] for r in data_rows]
+                # Prepare base dataframe
+                final_rows = [df.iloc[i].copy() for i in range(5)] + [r[1].copy() for r in data_rows]
+                
+                # If Delta Integration is on, update values in the rows for delta columns
+                if use_deltas and df_delta is not None:
+                    for row_idx, row in enumerate(final_rows):
+                        # Determine the source row index in the delta sheet
+                        # Header rows (0-4) match directly; data rows match based on original index
+                        source_row_idx = row_idx if row_idx < 5 else data_rows[row_idx - 5][0]
+                        
+                        for p_info in final_product_cols:
+                            # Delta columns are typically indices from the 3rd column onwards in a product block
+                            # e.g., index 2 and 3 if num_benchmarks is 2
+                            delta_indices = p_info['indices'][2:] 
+                            for col_idx in delta_indices:
+                                if col_idx < df_delta.shape[1]:
+                                    row.iloc[col_idx] = df_delta.iloc[source_row_idx, col_idx]
+
                 final_df = pd.DataFrame(final_rows)[cols_to_keep].reset_index(drop=True)
                 final_df.to_excel(writer, index=False, header=False, sheet_name='Report')
                 
@@ -139,8 +163,7 @@ if uploaded_file is not None:
 
                 # Formats
                 header_fmt = workbook.add_format({'bold': True, 'bg_color': '#455A64', 'font_color': 'white', 'border': 1, 'border_color': SOFT_BORDER, 'align': 'center', 'valign': 'vcenter'})
-                
-                # Dynamic Pastel Formats for Column A
+                sub_header_fmt = workbook.add_format({'bold': True, 'bg_color': '#CFD8DC', 'border': 1, 'border_color': SOFT_BORDER, 'align': 'center'})
                 pastel_fmts = [workbook.add_format({'bg_color': c, 'border': 1, 'border_color': SOFT_BORDER, 'valign': 'vcenter', 'text_wrap': True}) for c in PASTELS]
 
                 # A. Headers
@@ -156,64 +179,59 @@ if uploaded_file is not None:
                         worksheet.merge_range(2, curr_c, 2, curr_c + n_cols - 1, p_info['name'], p_head_fmt)
                     else:
                         worksheet.write(2, curr_c, p_info['name'], p_head_fmt)
+                    
+                    # Row 5 (index 4) labels for this product
+                    for i, col_idx in enumerate(p_info['indices']):
+                        val = final_df.iloc[4, curr_c + i]
+                        worksheet.write(4, curr_c + i, val if pd.notna(val) else "", sub_header_fmt)
+                    
                     curr_c += n_cols
 
-                # B. Data with Outlines and Dotted Separators
+                # B. Data Body Styling
                 start_r = 5
                 pastel_idx = -1
                 last_root = None
-
                 for r in range(5, len(final_df)):
                     q_val = str(final_df.iloc[r, 0])
                     root = get_question_root(q_val)
-                    
-                    # Logic: is this the last row of a specific question text group?
                     is_last_text = (r == len(final_df) - 1 or str(final_df.iloc[r+1, 0]) != q_val)
                     
-                    # 1. Pastel Logic for Column A (Consistent per Root)
                     if is_last_text:
                         if root != last_root:
                             pastel_idx += 1
                             last_root = root
-                        
-                        current_pastel = pastel_fmts[pastel_idx % len(PASTELS)]
-                        
-                        if r > start_r: 
-                            worksheet.merge_range(start_r, 0, r, 0, q_val, current_pastel)
-                        else: 
-                            worksheet.write(start_r, 0, q_val, current_pastel)
-                        
+                        fmt = pastel_fmts[pastel_idx % len(PASTELS)]
+                        if r > start_r: worksheet.merge_range(start_r, 0, r, 0, q_val, fmt)
+                        else: worksheet.write(start_r, 0, q_val, fmt)
                         start_r = r + 1
 
-                    # 2. Style each cell in the row
                     orig_row_idx = data_rows[r - 5][0]
                     for target_c in range(1, len(final_df.columns)):
                         orig_col_idx = cols_to_keep[target_c]
                         val = final_df.iloc[r, target_c]
                         meta = cell_metadata.get((orig_row_idx, orig_col_idx), {"color": None, "is_percent": False})
                         
-                        # Base Style: Muted borders + Dotted bottom if not last in group
-                        cell_style = {
-                            'border': 1, 
-                            'border_color': SOFT_BORDER,
-                            'bottom': 1 if is_last_text else 4 # 4 is Dotted
-                        }
+                        cell_style = {'border': 1, 'border_color': SOFT_BORDER, 'bottom': 1 if is_last_text else 4}
                         
-                        # Product block outlining (Thick edges)
+                        # Product block outlining
                         if target_c >= product_start_col:
-                            cols_in_block = len(final_product_cols[0]['indices'])
-                            block_pos = (target_c - product_start_col) % cols_in_block
-                            if block_pos == 0: cell_style['left'] = 2
-                            if block_pos == cols_in_block - 1: cell_style['right'] = 2
+                            block_size = len(final_product_cols[0]['indices'])
+                            pos = (target_c - product_start_col) % block_size
+                            if pos == 0: cell_style['left'] = 2
+                            if pos == block_size - 1: cell_style['right'] = 2
 
                         if meta["color"]: cell_style['bg_color'] = meta["color"]
+                        
+                        # Formatting (Deltas and Percentages)
                         if meta["is_percent"] or (str(final_df.iloc[r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float))):
                             cell_style['num_format'] = '0%'
+                        elif isinstance(val, (float, int)) and abs(val) < 1 and val != 0: # Catch small decimals as %
+                             cell_style['num_format'] = '0.0%'
                         
                         worksheet.write(r, target_c, val if pd.notna(val) else "", workbook.add_format(cell_style))
 
                 worksheet.set_column(0, 0, 30)
                 worksheet.set_column(1, 1, 20)
 
-            st.success("✅ Grouped Color Report Generated!")
-            st.download_button("📥 Download Excel", output.getvalue(), f"Styled_Report_{selected_sheet}.xlsx")
+            st.success("✅ Report with integrated Deltas generated!")
+            st.download_button("📥 Download Excel", output.getvalue(), f"Delta_Integrated_Report.xlsx")
