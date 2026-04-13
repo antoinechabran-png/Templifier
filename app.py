@@ -43,8 +43,6 @@ if uploaded_file is not None:
 
     # --- SIDEBAR SETTINGS ---
     st.sidebar.header("Global Settings")
-    
-    # NEW OPTION: Regrouping
     regroup_mode = st.sidebar.toggle("Enable Question Regrouping (e.g., group all Q-04-x)", value=True)
     
     all_p_names = list(product_triplets.keys())
@@ -58,13 +56,15 @@ if uploaded_file is not None:
     # --- MAIN UI: QUESTION & CATEGORIZED METRICS ---
     st.subheader("Step 1: Filter Questions and Metric Groups")
     
+    # Strip whitespace from Column B to ensure matching works correctly
+    df[0] = df[0].astype(str).str.strip()
+    df[1] = df[1].astype(str).str.strip()
+
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
     
-    # Logic to build the Question Map
-    # Structure: { Display_Name: { "original_qs": [], "metrics": [] } }
     ui_q_map = {}
-    
     for q_full in raw_data_area[0].unique():
+        if q_full == "nan" or q_full == "None": continue
         display_name = get_question_root(q_full) if regroup_mode else q_full
         metrics_for_this_q = df[df[0] == q_full][1].unique().tolist()
         
@@ -74,11 +74,11 @@ if uploaded_file is not None:
             ui_q_map[display_name]["originals"].append(q_full)
             ui_q_map[display_name]["metrics"].update(metrics_for_this_q)
 
-    selected_q_metrics = {} # Stores {Original_Q_Name: [list of metrics]}
+    selected_q_metrics = {} 
 
     for display_q, data in ui_q_map.items():
         with st.expander(f"❓ {display_q}", expanded=False):
-            metrics_list = sorted(list(data["metrics"]))
+            metrics_list = sorted([str(m) for m in data["metrics"] if pd.notna(m)])
             gen_group = [m for m in metrics_list if m in GENERAL_METRICS]
             mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
 
@@ -98,9 +98,10 @@ if uploaded_file is not None:
                     sel_mod = st.multiselect("Pick Modalities", mod_group, 
                                             default=mod_group if all_mod else [], key=f"sel_mod_{display_q}")
                 
-                # Apply selection to all original question labels in this group
+                # CRITICAL: Map the specific selection to every original attribute name
+                combined_selection = sel_gen + sel_mod
                 for orig in data["originals"]:
-                    selected_q_metrics[orig] = sel_gen + sel_mod
+                    selected_q_metrics[orig] = combined_selection
 
     # --- PROCESSING ---
     if st.button("🚀 Generate Templated Excel", type="primary"):
@@ -109,20 +110,23 @@ if uploaded_file is not None:
         
         valid_rows_list = []
         for _, row in data_rows.iterrows():
-            q_name = row[0]
-            m_name = row[1]
-            if q_name in selected_q_metrics and m_name in selected_q_metrics[q_name]:
-                valid_rows_list.append(row)
+            q_name = str(row[0]).strip()
+            m_name = str(row[1]).strip()
+            
+            # Strict Filtering: Only keep if the question is in our selection map 
+            # AND the specific metric for that question was checked
+            if q_name in selected_q_metrics:
+                if m_name in selected_q_metrics[q_name]:
+                    valid_rows_list.append(row)
         
         if not valid_rows_list:
-            st.error("No data found for selection.")
+            st.error("No data found for selection. Check if you unselected everything.")
         else:
             filtered_data = pd.DataFrame(valid_rows_list)
-            final_df = pd.concat([header_rows, filtered_data]).reset_index(drop=True)
-
+            
+            # Define columns to keep based on sidebar
             cols_to_keep = [0, 1, 2]
-            if show_sig:
-                cols_to_keep.append(3)
+            if show_sig: cols_to_keep.append(3)
 
             for p_name, indices in product_triplets.items():
                 if p_name in selected_products:
@@ -130,8 +134,9 @@ if uploaded_file is not None:
                         cols_to_keep.extend(indices)
                     else:
                         cols_to_keep.append(indices[0]) # Value
-                        cols_to_keep.append(indices[2]) # Base/Delta
+                        cols_to_keep.append(indices[2]) # Base
 
+            final_df = pd.concat([header_rows, filtered_data]).reset_index(drop=True)
             final_df = final_df[cols_to_keep]
 
             # --- EXPORT TO EXCEL ---
@@ -175,12 +180,10 @@ if uploaded_file is not None:
 
                 # 3. Data Formatting
                 for r in range(5, row_count):
-                    metric_type = final_df.iloc[r, 1]
+                    metric_type = str(final_df.iloc[r, 1])
                     for c in range(1, len(final_df.columns)):
                         val = final_df.iloc[r, c]
                         target_fmt = standard_fmt
-                        
-                        # Apply % if not "Mean" and is numeric
                         if metric_type not in ["Mean"] and isinstance(val, (int, float)):
                             target_fmt = percent_fmt
                         
@@ -189,7 +192,7 @@ if uploaded_file is not None:
                         else:
                             worksheet.write(r, c, "", standard_fmt)
 
-            st.success("✅ Success! Questions regrouped and Excel formatted.")
+            st.success("✅ File generated! Unselected metrics have been removed.")
             st.download_button(
                 label="📥 Download Excel File",
                 data=output.getvalue(),
