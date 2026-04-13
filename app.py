@@ -32,9 +32,17 @@ if uploaded_file is not None:
     st.sidebar.header("Integration Settings")
     use_deltas = st.sidebar.toggle("Enable Delta Integration", value=False)
     df_delta = None
+    delta_metadata = {}
     if use_deltas:
         delta_sheet_name = st.sidebar.selectbox("Select the Delta sheet", sheet_names)
-        df_delta = pd.DataFrame(wb[delta_sheet_name].values)
+        ws_delta = wb[delta_sheet_name]
+        df_delta = pd.DataFrame(ws_delta.values)
+        # Capture metadata for the Delta sheet as well
+        for r in range(1, ws_delta.max_row + 1):
+            for c in range(1, ws_delta.max_column + 1):
+                cell = ws_delta.cell(row=r, column=c)
+                if cell.number_format and '%' in cell.number_format:
+                    delta_metadata[(r-1, c-1)] = True
 
     # Sidebar Data Structure Settings
     num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 2)
@@ -130,29 +138,31 @@ if uploaded_file is not None:
             final_product_cols = []
             for p in selected_products:
                 indices = product_triplets[p]
-                kept = indices if show_sig else indices[:2]
+                # If show_sig is true, we keep Value + Sig Gap + All Deltas
+                kept = indices if show_sig else indices[:1] # indices[:1] would just be value
                 final_product_cols.append({'name': p, 'indices': kept})
                 cols_to_keep.extend(kept)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Prepare base dataframe
+                # Prepare base rows
                 final_rows = [df.iloc[i].copy() for i in range(5)] + [r[1].copy() for r in data_rows]
                 
-                # If Delta Integration is on, update values in the rows for delta columns
+                # If Delta Integration is on, override the delta values from the delta sheet
                 if use_deltas and df_delta is not None:
                     for row_idx, row in enumerate(final_rows):
-                        # Determine the source row index in the delta sheet
-                        # Header rows (0-4) match directly; data rows match based on original index
                         source_row_idx = row_idx if row_idx < 5 else data_rows[row_idx - 5][0]
-                        
                         for p_info in final_product_cols:
-                            # Delta columns are typically indices from the 3rd column onwards in a product block
-                            # e.g., index 2 and 3 if num_benchmarks is 2
-                            delta_indices = p_info['indices'][2:] 
-                            for col_idx in delta_indices:
+                            # Delta columns are index 2 onwards in the product triplet/quadruplet
+                            delta_idxs = p_info['indices'][2:]
+                            for col_idx in delta_idxs:
                                 if col_idx < df_delta.shape[1]:
-                                    row.iloc[col_idx] = df_delta.iloc[source_row_idx, col_idx]
+                                    raw_val = df_delta.iloc[source_row_idx, col_idx]
+                                    # Logic: If it's a percentage in the delta sheet, multiply by 100 to remove % symbol
+                                    if delta_metadata.get((source_row_idx, col_idx), False) and isinstance(raw_val, (int, float)):
+                                        row.iloc[col_idx] = raw_val * 100
+                                    else:
+                                        row.iloc[col_idx] = raw_val
 
                 final_df = pd.DataFrame(final_rows)[cols_to_keep].reset_index(drop=True)
                 final_df.to_excel(writer, index=False, header=False, sheet_name='Report')
@@ -180,11 +190,10 @@ if uploaded_file is not None:
                     else:
                         worksheet.write(2, curr_c, p_info['name'], p_head_fmt)
                     
-                    # Row 5 (index 4) labels for this product
+                    # Row 5 (index 4) labels
                     for i, col_idx in enumerate(p_info['indices']):
                         val = final_df.iloc[4, curr_c + i]
                         worksheet.write(4, curr_c + i, val if pd.notna(val) else "", sub_header_fmt)
-                    
                     curr_c += n_cols
 
                 # B. Data Body Styling
@@ -206,32 +215,48 @@ if uploaded_file is not None:
                         start_r = r + 1
 
                     orig_row_idx = data_rows[r - 5][0]
+                    curr_product_start = product_start_col
+                    
                     for target_c in range(1, len(final_df.columns)):
                         orig_col_idx = cols_to_keep[target_c]
                         val = final_df.iloc[r, target_c]
                         meta = cell_metadata.get((orig_row_idx, orig_col_idx), {"color": None, "is_percent": False})
                         
-                        cell_style = {'border': 1, 'border_color': SOFT_BORDER, 'bottom': 1 if is_last_text else 4}
+                        cell_style = {'border': 1, 'border_color': SOFT_BORDER, 'bottom': 1 if is_last_text else 4, 'align': 'center'}
                         
-                        # Product block outlining
+                        # Detect Column Type within Product
+                        is_delta_col = False
+                        is_color_col = False
                         if target_c >= product_start_col:
                             block_size = len(final_product_cols[0]['indices'])
-                            pos = (target_c - product_start_col) % block_size
-                            if pos == 0: cell_style['left'] = 2
-                            if pos == block_size - 1: cell_style['right'] = 2
+                            pos_in_block = (target_c - product_start_col) % block_size
+                            if pos_in_block == 0: cell_style['left'] = 2
+                            if pos_in_block == block_size - 1: cell_style['right'] = 2
+                            
+                            if pos_in_block == 1: is_color_col = True
+                            if pos_in_block >= 2: is_delta_col = True
 
-                        if meta["color"]: cell_style['bg_color'] = meta["color"]
+                        # Formatting Logic
+                        if is_color_col:
+                            val = "" # Remove text/figures from color columns as requested
                         
-                        # Formatting (Deltas and Percentages)
-                        if meta["is_percent"] or (str(final_df.iloc[r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float))):
-                            cell_style['num_format'] = '0%'
-                        elif isinstance(val, (float, int)) and abs(val) < 1 and val != 0: # Catch small decimals as %
-                             cell_style['num_format'] = '0.0%'
+                        if meta["color"]: 
+                            cell_style['bg_color'] = meta["color"]
                         
+                        # Apply numeric formats (unless it's a delta, which we already processed)
+                        if not is_delta_col:
+                            if meta["is_percent"] or (str(final_df.iloc[r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float))):
+                                cell_style['num_format'] = '0%'
+                            elif isinstance(val, (float, int)) and abs(val) < 1 and val != 0:
+                                cell_style['num_format'] = '0.0%'
+                        else:
+                            # For Deltas, ensure it's displayed as a plain number (no % sign)
+                            cell_style['num_format'] = '0.00' if isinstance(val, float) else '0'
+
                         worksheet.write(r, target_c, val if pd.notna(val) else "", workbook.add_format(cell_style))
 
                 worksheet.set_column(0, 0, 30)
                 worksheet.set_column(1, 1, 20)
 
             st.success("✅ Report with integrated Deltas generated!")
-            st.download_button("📥 Download Excel", output.getvalue(), f"Delta_Integrated_Report.xlsx")
+            st.download_button("📥 Download Excel", output.getvalue(), f"Delta_Report.xlsx")
