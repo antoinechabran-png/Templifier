@@ -20,41 +20,43 @@ st.title("📊 Market Research Templifier")
 uploaded_file = st.file_uploader("Upload Raw Results (Excel)", type=["xlsx"])
 
 if uploaded_file is not None:
-    # --- 1. DATA, COLOR & FORMAT LOADING ---
+    # --- 1. SETTINGS & LOADING ---
     wb = openpyxl.load_workbook(uploaded_file, data_only=True)
     sheet_names = wb.sheetnames
     selected_sheet = st.selectbox("Select the sheet to process", sheet_names)
     ws = wb[selected_sheet]
     
-    # Load data into pandas for parsing
+    # NEW: Option for multiple benchmarks
+    num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 1)
+    # Each benchmark takes 2 columns starting from index 2 (Col C)
+    # Total benchmark columns = num_benchmarks * 2
+    bench_start_col = 2
+    product_start_col = bench_start_col + (num_benchmarks * 2)
+
+    # Load data
     df = pd.DataFrame(ws.values)
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
 
-    # Map to store color and number format (percentage) from original
-    # Key: (row_idx, col_idx)
+    # Capture metadata (Color and Percentages)
     cell_metadata = {}
     for r in range(1, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=r, column=c)
             meta = {"color": None, "is_percent": False}
-            
-            # 1. Capture Color (ARGB to Hex)
             if cell.fill and cell.fill.start_color.index != "00000000" and cell.fill.start_color.rgb != "FFFFFFFF":
                 color_hex = cell.fill.start_color.rgb
                 if isinstance(color_hex, str) and len(color_hex) == 8:
                     meta["color"] = f"#{color_hex[2:]}"
-            
-            # 2. Capture Percentage Format
             if cell.number_format and '%' in cell.number_format:
                 meta["is_percent"] = True
-                
             if meta["color"] or meta["is_percent"]:
                 cell_metadata[(r-1, c-1)] = meta
 
-    # --- 2. PARSING PRODUCTS ---
+    # --- 2. PARSING PRODUCTS (Dynamic Start) ---
     product_triplets = {}
-    for col_idx in range(4, len(df.columns) - 2, 3):
+    # Iterate through triplets starting from our calculated product_start_col
+    for col_idx in range(product_start_col, len(df.columns) - 2, 3):
         p_name = df.iloc[2, col_idx]
         if pd.isna(p_name): p_name = f"Product at Column {col_idx+1}"
         product_triplets[p_name] = [col_idx, col_idx + 1, col_idx + 2]
@@ -63,9 +65,9 @@ if uploaded_file is not None:
     regroup_mode = st.sidebar.toggle("Enable Question Regrouping", value=True)
     all_p_names = list(product_triplets.keys())
     selected_products = st.sidebar.multiselect("Select Products", all_p_names, default=all_p_names)
-    show_sig = st.sidebar.checkbox("Show Significance Columns", value=True)
+    show_sig = st.sidebar.checkbox("Show Significance Columns for Products", value=True)
 
-    # --- UI FILTERING LOGIC ---
+    # --- UI FILTERING ---
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
     ui_q_map = {}
     for q_full in raw_data_area[0].unique():
@@ -84,15 +86,12 @@ if uploaded_file is not None:
             metrics_list = sorted([str(m) for m in data["metrics"] if pd.notna(m)])
             gen_group = [m for m in metrics_list if m in GENERAL_METRICS]
             mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
-            
             c1, c2, c3 = st.columns([1, 2, 2])
             is_active = c1.checkbox("Keep", value=True, key=f"act_{display_q}")
-            
             if is_active:
                 m_gen_k, m_mod_k = f"mg_{display_q}", f"mm_{display_q}"
                 if m_gen_k not in st.session_state: st.session_state[m_gen_k] = gen_group
                 if m_mod_k not in st.session_state: st.session_state[m_mod_k] = mod_group
-
                 with c2:
                     st.write("General")
                     if st.button("Select All", key=f"allg_{display_q}"): st.session_state[m_gen_k] = gen_group
@@ -103,7 +102,6 @@ if uploaded_file is not None:
                     if st.button("Select All", key=f"allm_{display_q}"): st.session_state[m_mod_k] = mod_group
                     if st.button("Unselect all", key=f"clrm_{display_q}"): st.session_state[m_mod_k] = []
                     sel_mod = st.multiselect("Pick", mod_group, key=m_mod_k)
-                
                 for orig in data["originals"]:
                     selected_q_metrics[orig] = set(sel_gen + sel_mod)
 
@@ -118,8 +116,10 @@ if uploaded_file is not None:
         if not data_rows:
             st.error("No data selected.")
         else:
-            cols_to_keep = [0, 1, 2]
-            if show_sig: cols_to_keep.append(3)
+            # Columns to keep: Always [0, 1] + all benchmark columns
+            cols_to_keep = [0, 1]
+            benchmark_cols = list(range(bench_start_col, product_start_col))
+            cols_to_keep.extend(benchmark_cols)
             
             final_product_cols = []
             for p in selected_products:
@@ -142,12 +142,16 @@ if uploaded_file is not None:
 
                 # Formats
                 header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center'})
-                percent_fmt = workbook.add_format({'num_format': '0%', 'border': 1})
-                std_fmt = workbook.add_format({'border': 1})
                 merge_fmt = workbook.add_format({'valign': 'vcenter', 'align': 'left', 'border': 1, 'text_wrap': True})
 
-                # A. Merge Product Names in Row 3
-                current_col = 4 if show_sig else 3
+                # A. Merge Benchmark and Product Headers in Row 3
+                # Benchmarks (usually 2 columns each)
+                for b_idx in range(num_benchmarks):
+                    b_col_start = 2 + (b_idx * 2)
+                    worksheet.merge_range(2, b_col_start, 2, b_col_start + 1, f"Benchmark {b_idx+1}", header_fmt)
+
+                # Products
+                current_col = product_start_col
                 for p_info in final_product_cols:
                     num_cols = len(p_info['indices'])
                     if num_cols > 1:
@@ -165,7 +169,7 @@ if uploaded_file is not None:
                         start_r = r
                 worksheet.merge_range(start_r, 0, len(final_df)-1, 0, final_df.iloc[start_r, 0], merge_fmt)
 
-                # C. Data & Format Application
+                # C. Final Data Application (Preserving Original Format & Colors)
                 for target_r in range(5, len(final_df)):
                     orig_row_idx = data_rows[target_r - 5][0]
                     for target_c in range(1, len(final_df.columns)):
@@ -173,10 +177,8 @@ if uploaded_file is not None:
                         val = final_df.iloc[target_r, target_c]
                         meta = cell_metadata.get((orig_row_idx, orig_col_idx), {"color": None, "is_percent": False})
                         
-                        # Determine formatting
                         is_pct = meta["is_percent"] or (str(final_df.iloc[target_r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float)))
                         
-                        # Apply specialized format for cell (handling color + percent combinations)
                         cell_fmt_dict = {'border': 1}
                         if meta["color"]: cell_fmt_dict['bg_color'] = meta["color"]
                         if is_pct: cell_fmt_dict['num_format'] = '0%'
@@ -184,5 +186,5 @@ if uploaded_file is not None:
                         applied_fmt = workbook.add_format(cell_fmt_dict)
                         worksheet.write(target_r, target_c, val if pd.notna(val) else "", applied_fmt)
 
-            st.success("✅ Excel Generated!")
-            st.download_button("📥 Download", output.getvalue(), f"Formatted_{selected_sheet}.xlsx")
+            st.success(f"✅ Generated with {num_benchmarks} benchmark(s) preserved!")
+            st.download_button("📥 Download", output.getvalue(), f"MultiBench_{selected_sheet}.xlsx")
