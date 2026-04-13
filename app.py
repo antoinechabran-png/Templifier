@@ -25,69 +25,68 @@ if uploaded_file is not None:
     # --- 1. SETTINGS & LOADING ---
     wb = openpyxl.load_workbook(uploaded_file, data_only=True)
     sheet_names = wb.sheetnames
-    selected_sheet = st.selectbox("Select the main sheet to process", sheet_names)
-    ws = wb[selected_sheet]
     
-    # Delta Integration Settings
-    st.sidebar.header("Integration Settings")
-    use_deltas = st.sidebar.toggle("Enable Delta Integration", value=True)
-    df_delta = None
-    delta_metadata = {}
-    if use_deltas:
-        delta_sheet_name = st.sidebar.selectbox("Select the Delta sheet", sheet_names)
-        ws_delta = wb[delta_sheet_name]
-        df_delta = pd.DataFrame(ws_delta.values)
-        for r in range(1, ws_delta.max_row + 1):
-            for c in range(1, ws_delta.max_column + 1):
-                cell = ws_delta.cell(row=r, column=c)
-                if cell.number_format and '%' in cell.number_format:
-                    delta_metadata[(r-1, c-1)] = True
+    st.sidebar.header("Sheet Selection")
+    main_sheet_name = st.sidebar.selectbox("Select the MAIN sheet (with colors)", sheet_names)
+    delta_sheet_name = st.sidebar.selectbox("Select the DELTA sheet (with numbers)", sheet_names)
+    
+    num_benchmarks = st.sidebar.slider("Number of Benchmarks", 1, 5, 2)
+    
+    ws_main = wb[main_sheet_name]
+    ws_delta = wb[delta_sheet_name]
+    
+    df_main = pd.DataFrame(ws_main.values)
+    df_delta = pd.DataFrame(ws_delta.values)
 
-    num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 2)
-    bench_start_col = 2
-    product_start_col = bench_start_col + (num_benchmarks * 2)
-    cols_per_product = 2 + num_benchmarks
-
-    df = pd.DataFrame(ws.values)
-    df[0] = df[0].astype(str).str.strip()
-    df[1] = df[1].astype(str).str.strip()
-
-    # Capture metadata from main sheet
-    cell_metadata = {}
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
+    # Metadata capture from Main Sheet
+    main_metadata = {}
+    for r in range(1, ws_main.max_row + 1):
+        for c in range(1, ws_main.max_column + 1):
+            cell = ws_main.cell(row=r, column=c)
             meta = {"color": None, "is_percent": False}
-            if cell.fill and cell.fill.start_color.index != "00000000" and cell.fill.start_color.rgb != "FFFFFFFF":
+            if cell.fill and cell.fill.start_color.rgb and cell.fill.start_color.rgb != "00000000" and cell.fill.start_color.rgb != "FFFFFFFF":
                 color_hex = cell.fill.start_color.rgb
-                if isinstance(color_hex, str) and len(color_hex) == 8:
-                    meta["color"] = f"#{color_hex[2:]}"
+                meta["color"] = f"#{color_hex[2:]}" if len(color_hex) == 8 else f"#{color_hex}"
             if cell.number_format and '%' in cell.number_format:
                 meta["is_percent"] = True
             if meta["color"] or meta["is_percent"]:
-                cell_metadata[(r-1, c-1)] = meta
+                main_metadata[(r-1, c-1)] = meta
 
-    # --- 2. PARSING PRODUCTS ---
-    product_triplets = {} 
-    for col_idx in range(product_start_col, len(df.columns) - (cols_per_product - 1), cols_per_product):
-        p_name = df.iloc[2, col_idx]
-        if pd.isna(p_name) or str(p_name).strip().lower() in ["none", "nan", ""]: 
-            p_name = f"Product at Col {get_column_letter(col_idx+1)}"
-        product_triplets[str(p_name).strip()] = list(range(col_idx, col_idx + cols_per_product))
+    # --- 2. COLUMN MAPPING ---
+    # Benchmark columns are always 2 per benchmark (Val, Sig)
+    bench_cols_end = 2 + (num_benchmarks * 2)
+    # Product columns in Delta sheet: 2 (Val, Sig) + num_benchmarks (Deltas)
+    delta_cols_per_product = 2 + num_benchmarks
+    # Product columns in Main sheet: 2 (Val, Sig)
+    main_cols_per_product = 2
 
-    # --- SIDEBAR FILTERS ---
-    regroup_mode = st.sidebar.toggle("Enable Question Regrouping", value=True)
-    all_p_names = list(product_triplets.keys())
-    selected_products = st.sidebar.multiselect("Select Products to Include", all_p_names, default=all_p_names)
+    products = []
+    for col_idx in range(bench_cols_end, df_delta.shape[1], delta_cols_per_product):
+        p_name = df_delta.iloc[2, col_idx]
+        if pd.isna(p_name) or str(p_name).strip() == "": 
+            p_name = f"Product {len(products)+1}"
+        
+        p_idx = len(products)
+        products.append({
+            "name": str(p_name).strip(),
+            "delta_indices": list(range(col_idx, col_idx + delta_cols_per_product)),
+            "main_indices": [bench_cols_end + (p_idx * 2), bench_cols_end + (p_idx * 2) + 1]
+        })
 
-    # --- UI FILTERING (METRIC SELECTION) ---
-    st.header("🎯 Question & Metric Selection")
-    raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
+    # --- 3. UI FILTERING (METRIC SELECTION) ---
+    st.sidebar.header("Filters")
+    regroup_mode = st.sidebar.toggle("Regroup by Question ID", value=True)
+    
+    selected_product_names = st.sidebar.multiselect("Select Products", [p['name'] for p in products], default=[p['name'] for p in products])
+    final_products = [p for p in products if p['name'] in selected_product_names]
+
+    st.header("🎯 Metric Selection")
+    # Use df_delta as row reference
+    raw_rows = df_delta.iloc[5:, [0, 1]].dropna(subset=[0])
     ui_q_map = {}
-    for q_full in raw_data_area[0].unique():
-        if q_full in ["nan", "None", ""]: continue
+    for q_full in raw_rows[0].unique():
         display_name = get_question_root(q_full) if regroup_mode else q_full
-        metrics = df[df[0] == q_full][1].unique().tolist()
+        metrics = df_delta[df_delta[0] == q_full][1].unique().tolist()
         if display_name not in ui_q_map:
             ui_q_map[display_name] = {"originals": [q_full], "metrics": set(metrics)}
         else:
@@ -102,7 +101,7 @@ if uploaded_file is not None:
             mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
             
             c1, c2, c3 = st.columns([1, 2, 2])
-            is_active = c1.checkbox("Keep Question", value=True, key=f"act_{display_q}")
+            is_active = c1.checkbox("Keep", value=True, key=f"act_{display_q}")
             
             if is_active:
                 m_gen_key, m_mod_key = f"mg_{display_q}", f"mm_{display_q}"
@@ -110,146 +109,116 @@ if uploaded_file is not None:
                 if m_mod_key not in st.session_state: st.session_state[m_mod_key] = mod_group
                 
                 with c2:
-                    st.write("**General Metrics**")
-                    col_a, col_b = st.columns(2)
-                    if col_a.button("All", key=f"allg_{display_q}"): 
-                        st.session_state[m_gen_key] = gen_group
-                        st.rerun()
-                    if col_b.button("None", key=f"clrg_{display_q}"): 
-                        st.session_state[m_gen_key] = []
-                        st.rerun()
+                    st.write("General")
+                    ca, cb = st.columns(2)
+                    if ca.button("All", key=f"allg_{display_q}"): st.session_state[m_gen_key] = gen_group
+                    if cb.button("None", key=f"clrg_{display_q}"): st.session_state[m_gen_key] = []
                     sel_gen = st.multiselect("Select", gen_group, key=m_gen_key)
-                    
                 with c3:
-                    st.write("**Modalities**")
-                    col_a, col_b = st.columns(2)
-                    if col_a.button("All", key=f"allm_{display_q}"): 
-                        st.session_state[m_mod_key] = mod_group
-                        st.rerun()
-                    if col_b.button("None", key=f"clrm_{display_q}"): 
-                        st.session_state[m_mod_key] = []
-                        st.rerun()
+                    st.write("Modalities")
+                    ca, cb = st.columns(2)
+                    if ca.button("All", key=f"allm_{display_q}"): st.session_state[m_mod_key] = mod_group
+                    if cb.button("None", key=f"clrm_{display_q}"): st.session_state[m_mod_key] = []
                     sel_mod = st.multiselect("Select", mod_group, key=m_mod_key)
                 
                 for orig in data["originals"]:
                     selected_q_metrics[orig] = set(sel_gen + sel_mod)
 
-    # --- 3. EXPORT ---
-    if st.button("🚀 Generate Beautiful Excel"):
-        data_rows = []
-        for idx, row in df.iloc[5:].iterrows():
-            q_name, m_name = str(row[0]).strip(), str(row[1]).strip()
-            if q_name in selected_q_metrics and m_name in selected_q_metrics[q_name]:
-                data_rows.append((idx, row))
-
-        if not data_rows:
-            st.error("No questions selected.")
-        else:
-            cols_to_keep = [0, 1]
-            cols_to_keep.extend(list(range(bench_start_col, product_start_col)))
+    # --- 4. EXPORT ---
+    if st.button("🚀 Generate Report"):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            worksheet = workbook.add_worksheet('Report')
+            worksheet.freeze_panes(5, 2)
             
-            final_product_cols = []
-            for p in selected_products:
-                indices = product_triplets[p]
-                # indices[0] = Value, indices[1] = Sig, indices[2:] = Deltas
-                final_product_cols.append({'name': p, 'indices': indices})
-                cols_to_keep.extend(indices)
+            # Formats
+            header_fmt = workbook.add_format({'bold': True, 'bg_color': '#455A64', 'font_color': 'white', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
+            sub_header_fmt = workbook.add_format({'bold': True, 'bg_color': '#CFD8DC', 'border': 1, 'align': 'center'})
+            pastel_fmts = [workbook.add_format({'bg_color': c, 'border': 1, 'valign': 'vcenter', 'text_wrap': True}) for c in PASTELS]
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                final_rows = [df.iloc[i].copy() for i in range(5)] + [r[1].copy() for r in data_rows]
-                
-                # INTEGRATE DELTAS INTO DATA ROWS
-                if use_deltas and df_delta is not None:
-                    for row_idx, row in enumerate(final_rows):
-                        source_row_idx = row_idx if row_idx < 5 else data_rows[row_idx - 5][0]
-                        for p_info in final_product_cols:
-                            delta_idxs = p_info['indices'][2:]
-                            for col_idx in delta_idxs:
-                                if col_idx < df_delta.shape[1]:
-                                    val = df_delta.iloc[source_row_idx, col_idx]
-                                    if delta_metadata.get((source_row_idx, col_idx), False) and isinstance(val, (int, float)):
-                                        row.iloc[col_idx] = val * 100
-                                    else:
-                                        row.iloc[col_idx] = val
+            # Build Header
+            worksheet.write(2, 0, "Variable", header_fmt)
+            worksheet.write(2, 1, "Metric", header_fmt)
+            
+            curr_col = 2
+            # Benchmarks
+            for i in range(num_benchmarks):
+                label = df_delta.iloc[2, 2 + (i*2)]
+                worksheet.merge_range(2, curr_col, 2, curr_col + 1, str(label), header_fmt)
+                worksheet.write(4, curr_col, "Value", sub_header_fmt)
+                worksheet.write(4, curr_col + 1, "Sig", sub_header_fmt)
+                curr_col += 2
+            
+            # Products
+            for p in final_products:
+                n_cols = len(p['delta_indices'])
+                worksheet.merge_range(2, curr_col, 2, curr_col + n_cols - 1, p['name'], header_fmt)
+                for i, d_idx in enumerate(p['delta_indices']):
+                    sub_label = df_delta.iloc[4, d_idx]
+                    worksheet.write(4, curr_col + i, str(sub_label) if pd.notna(sub_label) else "", sub_header_fmt)
+                curr_col += n_cols
 
-                final_df = pd.DataFrame(final_rows)[cols_to_keep].reset_index(drop=True)
-                final_df.to_excel(writer, index=False, header=False, sheet_name='Report')
-                
-                workbook, worksheet = writer.book, writer.sheets['Report']
-                worksheet.freeze_panes(5, 2)
-
-                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#455A64', 'font_color': 'white', 'border': 1, 'border_color': SOFT_BORDER, 'align': 'center', 'valign': 'vcenter'})
-                sub_header_fmt = workbook.add_format({'bold': True, 'bg_color': '#CFD8DC', 'border': 1, 'border_color': SOFT_BORDER, 'align': 'center'})
-                pastel_fmts = [workbook.add_format({'bg_color': c, 'border': 1, 'border_color': SOFT_BORDER, 'valign': 'vcenter', 'text_wrap': True}) for c in PASTELS]
-
-                # A. HEADERS
-                # Benchmark headers
-                for b_idx in range(num_benchmarks):
-                    b_col = 2 + (b_idx * 2)
-                    worksheet.merge_range(2, b_col, 2, b_col + 1, str(df.iloc[2, b_col]), header_fmt)
-
-                # Product headers
-                curr_c = product_start_col
-                for p_info in final_product_cols:
-                    n_cols = len(p_info['indices'])
-                    p_head_fmt = workbook.add_format({'bold': True, 'bg_color': '#455A64', 'font_color': 'white', 'border': 1, 'border_color': SOFT_BORDER, 'left': 2, 'right': 2, 'align': 'center', 'valign': 'vcenter'})
-                    worksheet.merge_range(2, curr_c, 2, curr_c + n_cols - 1, p_info['name'], p_head_fmt)
-                    for i in range(n_cols):
-                        val = final_df.iloc[4, curr_c + i]
-                        worksheet.write(4, curr_c + i, val if pd.notna(val) else "", sub_header_fmt)
-                    curr_c += n_cols
-
-                # B. DATA BODY
-                start_r = 5
-                last_root = None
-                pastel_idx = -1
-                for r in range(5, len(final_df)):
-                    q_val = str(final_df.iloc[r, 0])
+            # Data Body
+            out_row = 5
+            last_root = None
+            pastel_idx = -1
+            
+            for r_idx in range(5, len(df_delta)):
+                q_val, m_val = str(df_delta.iloc[r_idx, 0]).strip(), str(df_delta.iloc[r_idx, 1]).strip()
+                if q_val in selected_q_metrics and m_val in selected_q_metrics[q_val]:
+                    # Question grouping & Pastel logic
                     root = get_question_root(q_val)
-                    is_last_text = (r == len(final_df) - 1 or str(final_df.iloc[r+1, 0]) != q_val)
+                    if root != last_root:
+                        pastel_idx += 1
+                        last_root = root
                     
-                    if is_last_text:
-                        if root != last_root:
-                            pastel_idx += 1
-                            last_root = root
-                        fmt = pastel_fmts[pastel_idx % len(PASTELS)]
-                        if r > start_r: worksheet.merge_range(start_r, 0, r, 0, q_val, fmt)
-                        else: worksheet.write(start_r, 0, q_val, fmt)
-                        start_r = r + 1
-
-                    orig_row_idx = data_rows[r - 5][0]
-                    for target_c in range(1, len(final_df.columns)):
-                        orig_col_idx = cols_to_keep[target_c]
-                        val = final_df.iloc[r, target_c]
-                        meta = cell_metadata.get((orig_row_idx, orig_col_idx), {"color": None, "is_percent": False})
+                    row_fmt = pastel_fmts[pastel_idx % len(PASTELS)]
+                    worksheet.write(out_row, 0, q_val, row_fmt)
+                    worksheet.write(out_row, 1, m_val, workbook.add_format({'border': 1}))
+                    
+                    # Fill Benchmarks
+                    for b_idx in range(num_benchmarks * 2):
+                        c_idx = 2 + b_idx
+                        val = df_delta.iloc[r_idx, c_idx]
+                        meta = main_metadata.get((r_idx, c_idx), {"color": None, "is_percent": False})
+                        fmt_dict = {'border': 1, 'align': 'center'}
+                        if meta["color"]: fmt_dict['bg_color'] = meta["color"]
+                        if meta["is_percent"]: fmt_dict['num_format'] = '0%'
+                        worksheet.write(out_row, c_idx, val if pd.notna(val) else "", workbook.add_format(fmt_dict))
+                    
+                    # Fill Products
+                    p_start_col = 2 + (num_benchmarks * 2)
+                    for p in final_products:
+                        # 1. Value Column
+                        v_idx = p['delta_indices'][0]
+                        v_main_idx = p['main_indices'][0]
+                        v_meta = main_metadata.get((r_idx, v_main_idx), {"color": None, "is_percent": False})
+                        v_fmt = {'border': 1, 'align': 'center', 'left': 2}
+                        if v_meta["color"]: v_fmt['bg_color'] = v_meta["color"]
+                        if v_meta["is_percent"]: v_fmt['num_format'] = '0%'
+                        worksheet.write(out_row, p_start_col, df_delta.iloc[r_idx, v_idx] if pd.notna(df_delta.iloc[r_idx, v_idx]) else "", workbook.add_format(v_fmt))
                         
-                        style = {'border': 1, 'border_color': SOFT_BORDER, 'bottom': 1 if is_last_text else 4, 'align': 'center'}
+                        # 2. Sig Column (Colored, No Text)
+                        s_main_idx = p['main_indices'][1]
+                        s_meta = main_metadata.get((r_idx, s_main_idx), {"color": None, "is_percent": False})
+                        s_fmt = {'border': 1}
+                        if s_meta["color"]: s_fmt['bg_color'] = s_meta["color"]
+                        worksheet.write(out_row, p_start_col + 1, "", workbook.add_format(s_fmt))
                         
-                        if target_c >= product_start_col:
-                            block_size = len(final_product_cols[0]['indices'])
-                            pos = (target_c - product_start_col) % block_size
-                            if pos == 0: style['left'] = 2
-                            if pos == block_size - 1: style['right'] = 2
-                            
-                            if pos == 1: # SIG COL (Keep Color, Clear Text)
-                                if meta["color"]: style['bg_color'] = meta["color"]
-                                val = ""
-                            elif pos >= 2: # DELTA COL (No Color, Show Numbers)
-                                style['bg_color'] = '#FFFFFF'
-                                style['num_format'] = '0.00' if isinstance(val, (int, float)) else '@'
-                            else: # VALUE COL
-                                if meta["color"]: style['bg_color'] = meta["color"]
-                                if meta["is_percent"] or (str(final_df.iloc[r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float))):
-                                    style['num_format'] = '0%'
-                        else: # Benchmark columns
-                            if meta["color"]: style['bg_color'] = meta["color"]
-                            if meta["is_percent"]: style['num_format'] = '0%'
+                        # 3. Delta Columns
+                        for i, d_idx in enumerate(p['delta_indices'][2:]):
+                            d_val = df_delta.iloc[r_idx, d_idx]
+                            d_fmt = {'border': 1, 'align': 'center', 'num_format': '0.00'}
+                            if i == len(p['delta_indices'][2:]) - 1: d_fmt['right'] = 2
+                            worksheet.write(out_row, p_start_col + 2 + i, d_val if pd.notna(d_val) else "", workbook.add_format(d_fmt))
+                        
+                        p_start_col += len(p['delta_indices'])
+                    
+                    out_row += 1
 
-                        worksheet.write(r, target_c, val if pd.notna(val) else "", workbook.add_format(style))
+            worksheet.set_column(0, 0, 40)
+            worksheet.set_column(1, 1, 20)
 
-                worksheet.set_column(0, 0, 35)
-                worksheet.set_column(1, 1, 20)
-
-            st.success("✅ Report Generated!")
-            st.download_button("📥 Download Excel", output.getvalue(), f"Templified_Report.xlsx")
+        st.success("✅ Done!")
+        st.download_button("📥 Download Excel", output.getvalue(), "Market_Research_Report.xlsx")
