@@ -26,15 +26,13 @@ if uploaded_file is not None:
     selected_sheet = st.selectbox("Select the sheet to process", sheet_names)
     ws = wb[selected_sheet]
     
-    # NEW: Option for multiple benchmarks
     num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 1)
-    # Each benchmark takes 2 columns starting from index 2 (Col C)
-    # Total benchmark columns = num_benchmarks * 2
     bench_start_col = 2
     product_start_col = bench_start_col + (num_benchmarks * 2)
 
     # Load data
     df = pd.DataFrame(ws.values)
+    # Clean up the question and metric columns for comparison
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
 
@@ -53,13 +51,15 @@ if uploaded_file is not None:
             if meta["color"] or meta["is_percent"]:
                 cell_metadata[(r-1, c-1)] = meta
 
-    # --- 2. PARSING PRODUCTS (Dynamic Start) ---
+    # --- 2. PARSING PRODUCTS (Using Original Row 3 Names) ---
     product_triplets = {}
-    # Iterate through triplets starting from our calculated product_start_col
     for col_idx in range(product_start_col, len(df.columns) - 2, 3):
+        # Pull original name from row 3 (index 2)
         p_name = df.iloc[2, col_idx]
-        if pd.isna(p_name): p_name = f"Product at Column {col_idx+1}"
-        product_triplets[p_name] = [col_idx, col_idx + 1, col_idx + 2]
+        if pd.isna(p_name) or str(p_name).strip() == "None": 
+            p_name = f"Empty Product (Col {get_column_letter(col_idx+1)})"
+        
+        product_triplets[str(p_name).strip()] = [col_idx, col_idx + 1, col_idx + 2]
 
     # --- SIDEBAR ---
     regroup_mode = st.sidebar.toggle("Enable Question Regrouping", value=True)
@@ -116,7 +116,6 @@ if uploaded_file is not None:
         if not data_rows:
             st.error("No data selected.")
         else:
-            # Columns to keep: Always [0, 1] + all benchmark columns
             cols_to_keep = [0, 1]
             benchmark_cols = list(range(bench_start_col, product_start_col))
             cols_to_keep.extend(benchmark_cols)
@@ -144,14 +143,16 @@ if uploaded_file is not None:
                 header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center'})
                 merge_fmt = workbook.add_format({'valign': 'vcenter', 'align': 'left', 'border': 1, 'text_wrap': True})
 
-                # A. Merge Benchmark and Product Headers in Row 3
-                # Benchmarks (usually 2 columns each)
+                # A. Merge Benchmark and Product Headers in Row 3 (Using Original Names)
+                # Benchmarks
                 for b_idx in range(num_benchmarks):
-                    b_col_start = 2 + (b_idx * 2)
-                    worksheet.merge_range(2, b_col_start, 2, b_col_start + 1, f"Benchmark {b_idx+1}", header_fmt)
+                    b_col_idx = 2 + (b_idx * 2)
+                    b_name = df.iloc[2, b_col_idx] # Get actual name from original row 3
+                    if pd.isna(b_name) or str(b_name).strip() == "None": b_name = f"Benchmark {b_idx+1}"
+                    worksheet.merge_range(2, b_col_idx, 2, b_col_idx + 1, str(b_name), header_fmt)
 
                 # Products
-                current_col = product_start_col
+                current_col = 2 + (num_benchmarks * 2)
                 for p_info in final_product_cols:
                     num_cols = len(p_info['indices'])
                     if num_cols > 1:
@@ -186,5 +187,5 @@ if uploaded_file is not None:
                         applied_fmt = workbook.add_format(cell_fmt_dict)
                         worksheet.write(target_r, target_c, val if pd.notna(val) else "", applied_fmt)
 
-            st.success(f"✅ Generated with {num_benchmarks} benchmark(s) preserved!")
-            st.download_button("📥 Download", output.getvalue(), f"MultiBench_{selected_sheet}.xlsx")
+            st.success("✅ Excel Generated with original names and formatting!")
+            st.download_button("📥 Download", output.getvalue(), f"Formatted_Report.xlsx")
