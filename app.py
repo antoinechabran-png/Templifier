@@ -26,13 +26,16 @@ if uploaded_file is not None:
     selected_sheet = st.selectbox("Select the sheet to process", sheet_names)
     ws = wb[selected_sheet]
     
-    num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 1)
+    # Sidebar Settings
+    num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 2)
     bench_start_col = 2
+    # Products start after Var, Metric, and (num_benchmarks * 2) columns
     product_start_col = bench_start_col + (num_benchmarks * 2)
+    # Each product block = 1 value + 1 sig letter + N benchmark sigs
+    cols_per_product = 2 + num_benchmarks
 
-    # Load data
+    # Load data into DataFrame
     df = pd.DataFrame(ws.values)
-    # Clean up the question and metric columns for comparison
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
 
@@ -51,21 +54,25 @@ if uploaded_file is not None:
             if meta["color"] or meta["is_percent"]:
                 cell_metadata[(r-1, c-1)] = meta
 
-    # --- 2. PARSING PRODUCTS (Using Original Row 3 Names) ---
-    product_triplets = {}
-    for col_idx in range(product_start_col, len(df.columns) - 2, 3):
-        # Pull original name from row 3 (index 2)
+    # --- 2. PARSING PRODUCTS (Dynamic Block Logic) ---
+    product_triplets = {} 
+    # Iterate through blocks using the calculated dynamic step
+    for col_idx in range(product_start_col, len(df.columns) - (cols_per_product - 1), cols_per_product):
+        # Pull name from row 3 (index 2). 
+        # Even if cells are merged, the value is stored in the first column of the merge.
         p_name = df.iloc[2, col_idx]
-        if pd.isna(p_name) or str(p_name).strip() == "None": 
-            p_name = f"Empty Product (Col {get_column_letter(col_idx+1)})"
         
-        product_triplets[str(p_name).strip()] = [col_idx, col_idx + 1, col_idx + 2]
+        if pd.isna(p_name) or str(p_name).strip().lower() in ["none", "nan", ""]: 
+            p_name = f"Product at Col {get_column_letter(col_idx+1)}"
+        
+        # Store all indices belonging to this product block
+        product_triplets[str(p_name).strip()] = list(range(col_idx, col_idx + cols_per_product))
 
-    # --- SIDEBAR ---
+    # --- SIDEBAR FILTERS ---
     regroup_mode = st.sidebar.toggle("Enable Question Regrouping", value=True)
     all_p_names = list(product_triplets.keys())
     selected_products = st.sidebar.multiselect("Select Products", all_p_names, default=all_p_names)
-    show_sig = st.sidebar.checkbox("Show Significance Columns for Products", value=True)
+    show_sig = st.sidebar.checkbox("Show Significance/Delta Columns for Products", value=True)
 
     # --- UI FILTERING ---
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
@@ -116,7 +123,9 @@ if uploaded_file is not None:
         if not data_rows:
             st.error("No data selected.")
         else:
+            # Construct final column selection
             cols_to_keep = [0, 1]
+            # Add all benchmark columns
             benchmark_cols = list(range(bench_start_col, product_start_col))
             cols_to_keep.extend(benchmark_cols)
             
@@ -124,14 +133,18 @@ if uploaded_file is not None:
             for p in selected_products:
                 indices = product_triplets[p]
                 if show_sig:
+                    # Keep entire block (Value, Sig Letter, and all N benchmark sigs)
                     final_product_cols.append({'name': p, 'indices': indices})
                     cols_to_keep.extend(indices)
                 else:
-                    final_product_cols.append({'name': p, 'indices': [indices[0], indices[2]]})
-                    cols_to_keep.extend([indices[0], indices[2]])
+                    # Keep only the Value and the primary Sig Letter (first 2)
+                    kept = indices[:2]
+                    final_product_cols.append({'name': p, 'indices': kept})
+                    cols_to_keep.extend(kept)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Prepare data
                 final_rows = [df.iloc[i] for i in range(5)] + [r[1] for r in data_rows]
                 final_df = pd.DataFrame(final_rows)[cols_to_keep].reset_index(drop=True)
                 final_df.to_excel(writer, index=False, header=False, sheet_name='Report')
@@ -140,26 +153,26 @@ if uploaded_file is not None:
                 worksheet = writer.sheets['Report']
 
                 # Formats
-                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center'})
+                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
                 merge_fmt = workbook.add_format({'valign': 'vcenter', 'align': 'left', 'border': 1, 'text_wrap': True})
 
-                # A. Merge Benchmark and Product Headers in Row 3 (Using Original Names)
-                # Benchmarks
+                # A. Merge Headers in Row 3
+                # Benchmarks (2 columns each)
                 for b_idx in range(num_benchmarks):
                     b_col_idx = 2 + (b_idx * 2)
-                    b_name = df.iloc[2, b_col_idx] # Get actual name from original row 3
+                    b_name = df.iloc[2, b_col_idx]
                     if pd.isna(b_name) or str(b_name).strip() == "None": b_name = f"Benchmark {b_idx+1}"
                     worksheet.merge_range(2, b_col_idx, 2, b_col_idx + 1, str(b_name), header_fmt)
 
-                # Products
-                current_col = 2 + (num_benchmarks * 2)
+                # Products (Dynamic number of columns)
+                current_col = product_start_col
                 for p_info in final_product_cols:
-                    num_cols = len(p_info['indices'])
-                    if num_cols > 1:
-                        worksheet.merge_range(2, current_col, 2, current_col + num_cols - 1, p_info['name'], header_fmt)
+                    n_cols = len(p_info['indices'])
+                    if n_cols > 1:
+                        worksheet.merge_range(2, current_col, 2, current_col + n_cols - 1, p_info['name'], header_fmt)
                     else:
                         worksheet.write(2, current_col, p_info['name'], header_fmt)
-                    current_col += num_cols
+                    current_col += n_cols
 
                 # B. Merge Question Names (Column A)
                 start_r = 5
@@ -170,7 +183,7 @@ if uploaded_file is not None:
                         start_r = r
                 worksheet.merge_range(start_r, 0, len(final_df)-1, 0, final_df.iloc[start_r, 0], merge_fmt)
 
-                # C. Final Data Application (Preserving Original Format & Colors)
+                # C. Final Data Application (Preserving Colors)
                 for target_r in range(5, len(final_df)):
                     orig_row_idx = data_rows[target_r - 5][0]
                     for target_c in range(1, len(final_df.columns)):
@@ -187,5 +200,5 @@ if uploaded_file is not None:
                         applied_fmt = workbook.add_format(cell_fmt_dict)
                         worksheet.write(target_r, target_c, val if pd.notna(val) else "", applied_fmt)
 
-            st.success("✅ Excel Generated with original names and formatting!")
-            st.download_button("📥 Download", output.getvalue(), f"Formatted_Report.xlsx")
+            st.success(f"✅ Generated! Product blocks calculated as {cols_per_product} columns wide.")
+            st.download_button("📥 Download Excel", output.getvalue(), f"Formatted_Report.xlsx")
