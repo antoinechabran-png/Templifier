@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
 # Set page config
 st.set_page_config(page_title="Market Research Templifier", layout="wide")
@@ -11,8 +12,13 @@ GENERAL_METRICS = [
     "Bottom Box", "Bottom 2 Boxes", "Bottom 3 Boxes"
 ]
 
+def get_question_root(q_text):
+    """Extracts the root (e.g., Q-04) from a string like Q-04-1-Premium."""
+    match = re.match(r"^(Q-\d+|S-\d+)", str(q_text))
+    return match.group(1) if match else str(q_text)
+
 st.title("📊 Market Research Templifier")
-st.write("Clean data, merge duplicate question labels, and preserve formatting.")
+st.write("Clean data, regroup question attributes, and preserve formatting.")
 
 # 1. FILE UPLOADER
 uploaded_file = st.file_uploader("Upload Raw Results (Excel or CSV)", type=["xlsx", "csv"])
@@ -36,47 +42,65 @@ if uploaded_file is not None:
         product_triplets[p_name] = [col_idx, col_idx + 1, col_idx + 2]
 
     # --- SIDEBAR SETTINGS ---
-    st.sidebar.header("Product & Sig Settings")
+    st.sidebar.header("Global Settings")
+    
+    # NEW OPTION: Regrouping
+    regroup_mode = st.sidebar.toggle("Enable Question Regrouping (e.g., group all Q-04-x)", value=True)
+    
     all_p_names = list(product_triplets.keys())
     selected_products = st.sidebar.multiselect(
         "Select Products to Keep", 
         all_p_names, 
         default=all_p_names
     )
-    show_sig = st.sidebar.checkbox("Show Significance/Delta Columns (D, F, I, L...)", value=True)
+    show_sig = st.sidebar.checkbox("Show Significance/Delta Columns", value=True)
 
     # --- MAIN UI: QUESTION & CATEGORIZED METRICS ---
     st.subheader("Step 1: Filter Questions and Metric Groups")
     
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
-    q_m_map = {}
-    for q in raw_data_area[0].unique():
-        metrics_for_q = df[df[0] == q][1].unique().tolist()
-        q_m_map[q] = metrics_for_q
+    
+    # Logic to build the Question Map
+    # Structure: { Display_Name: { "original_qs": [], "metrics": [] } }
+    ui_q_map = {}
+    
+    for q_full in raw_data_area[0].unique():
+        display_name = get_question_root(q_full) if regroup_mode else q_full
+        metrics_for_this_q = df[df[0] == q_full][1].unique().tolist()
+        
+        if display_name not in ui_q_map:
+            ui_q_map[display_name] = {"originals": [q_full], "metrics": set(metrics_for_this_q)}
+        else:
+            ui_q_map[display_name]["originals"].append(q_full)
+            ui_q_map[display_name]["metrics"].update(metrics_for_this_q)
 
-    selected_q_metrics = {}
+    selected_q_metrics = {} # Stores {Original_Q_Name: [list of metrics]}
 
-    for q, metrics in q_m_map.items():
-        with st.expander(f"❓ {q}", expanded=False):
-            gen_group = [m for m in metrics if m in GENERAL_METRICS]
-            mod_group = [m for m in metrics if m not in GENERAL_METRICS]
+    for display_q, data in ui_q_map.items():
+        with st.expander(f"❓ {display_q}", expanded=False):
+            metrics_list = sorted(list(data["metrics"]))
+            gen_group = [m for m in metrics_list if m in GENERAL_METRICS]
+            mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
 
             col_q, col_gen, col_mod = st.columns([1, 2, 2])
             with col_q:
-                is_q_active = st.checkbox("Keep Question", value=True, key=f"q_active_{q}")
+                is_q_active = st.checkbox("Keep Group", value=True, key=f"active_{display_q}")
 
             if is_q_active:
                 with col_gen:
                     st.markdown("**General Metrics**")
-                    all_gen = st.checkbox("Select All General", value=True, key=f"all_gen_{q}")
+                    all_gen = st.checkbox("Select All General", value=True, key=f"all_gen_{display_q}")
                     sel_gen = st.multiselect("Pick General", gen_group, 
-                                            default=gen_group if all_gen else [], key=f"sel_gen_{q}")
+                                            default=gen_group if all_gen else [], key=f"sel_gen_{display_q}")
                 with col_mod:
                     st.markdown("**Answer Modalities**")
-                    all_mod = st.checkbox("Select All Modalities", value=True, key=f"all_mod_{q}")
+                    all_mod = st.checkbox("Select All Modalities", value=True, key=f"all_mod_{display_q}")
                     sel_mod = st.multiselect("Pick Modalities", mod_group, 
-                                            default=mod_group if all_mod else [], key=f"sel_mod_{q}")
-                selected_q_metrics[q] = sel_gen + sel_mod
+                                            default=mod_group if all_mod else [], key=f"sel_mod_{display_q}")
+                
+                # Apply selection to all original question labels in this group
+                for orig in data["originals"]:
+                    selected_q_metrics[orig] = sel_gen + sel_mod
 
     # --- PROCESSING ---
     if st.button("🚀 Generate Templated Excel", type="primary"):
@@ -124,13 +148,13 @@ if uploaded_file is not None:
                 percent_fmt = workbook.add_format({'num_format': '0%', 'border': 1})
                 standard_fmt = workbook.add_format({'border': 1})
 
-                # 1. Format Product Headers (Row 3)
+                # 1. Product Headers
                 for col_num in range(len(final_df.columns)):
                     val = final_df.iloc[2, col_num]
                     if pd.notna(val):
                         worksheet.write(2, col_num, val, header_fmt)
 
-                # 2. Merge Column A logic (Starting row index 5)
+                # 2. Merge Column A logic
                 start_row = 5
                 row_count = len(final_df)
                 if row_count > 5:
@@ -144,21 +168,19 @@ if uploaded_file is not None:
                                 worksheet.write(start_row, 0, current_q, merge_fmt)
                             start_row = r
                             current_q = new_q
-                    # Handle last group
                     if row_count - 1 > start_row:
                         worksheet.merge_range(start_row, 0, row_count - 1, 0, current_q, merge_fmt)
                     else:
                         worksheet.write(start_row, 0, current_q, merge_fmt)
 
-                # 3. Handle Data Formatting (% and Borders)
+                # 3. Data Formatting
                 for r in range(5, row_count):
+                    metric_type = final_df.iloc[r, 1]
                     for c in range(1, len(final_df.columns)):
                         val = final_df.iloc[r, c]
-                        # Apply percentage format if Column B says it's a modality or if value is a small float
-                        # (Adjusting logic: If the original metric is not "Mean", it's usually a %)
-                        metric_type = final_df.iloc[r, 1]
-                        
                         target_fmt = standard_fmt
+                        
+                        # Apply % if not "Mean" and is numeric
                         if metric_type not in ["Mean"] and isinstance(val, (int, float)):
                             target_fmt = percent_fmt
                         
@@ -167,7 +189,7 @@ if uploaded_file is not None:
                         else:
                             worksheet.write(r, c, "", standard_fmt)
 
-            st.success("✅ Success! Questions merged and percentages preserved.")
+            st.success("✅ Success! Questions regrouped and Excel formatted.")
             st.download_button(
                 label="📥 Download Excel File",
                 data=output.getvalue(),
