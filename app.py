@@ -6,16 +6,18 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 # Set page config
-st.set_page_config(page_title="Market Research Templifier", layout="wide")
+st.set_page_config(page_title="Market Research Templifier Pro", layout="wide")
 
 # Constants
 GENERAL_METRICS = ["Mean", "Top Box", "Top 2 Boxes", "Top 3 Boxes", "Bottom Box", "Bottom 2 Boxes", "Bottom 3 Boxes"]
+PASTELS = ['#E3F2FD', '#F3E5F5', '#E8F5E9', '#FFF3E0', '#FCE4EC'] # Blue, Purple, Green, Orange, Pink
+BORDER_COLOR = '#B0BEC5' # Soft blue-grey
 
 def get_question_root(q_text):
     match = re.match(r"^(Q-\d+|S-\d+)", str(q_text))
     return match.group(1) if match else str(q_text)
 
-st.title("📊 Market Research Templifier")
+st.title("🎨 Market Research Templifier - Designer Edition")
 
 uploaded_file = st.file_uploader("Upload Raw Results (Excel)", type=["xlsx"])
 
@@ -26,20 +28,16 @@ if uploaded_file is not None:
     selected_sheet = st.selectbox("Select the sheet to process", sheet_names)
     ws = wb[selected_sheet]
     
-    # Sidebar Settings
     num_benchmarks = st.sidebar.slider("Number of Benchmarks in Raw File", 1, 5, 2)
     bench_start_col = 2
-    # Products start after Var, Metric, and (num_benchmarks * 2) columns
     product_start_col = bench_start_col + (num_benchmarks * 2)
-    # Each product block = 1 value + 1 sig letter + N benchmark sigs
     cols_per_product = 2 + num_benchmarks
 
-    # Load data into DataFrame
     df = pd.DataFrame(ws.values)
     df[0] = df[0].astype(str).str.strip()
     df[1] = df[1].astype(str).str.strip()
 
-    # Capture metadata (Color and Percentages)
+    # Metadata capture
     cell_metadata = {}
     for r in range(1, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
@@ -54,151 +52,125 @@ if uploaded_file is not None:
             if meta["color"] or meta["is_percent"]:
                 cell_metadata[(r-1, c-1)] = meta
 
-    # --- 2. PARSING PRODUCTS (Dynamic Block Logic) ---
+    # --- 2. PARSING PRODUCTS ---
     product_triplets = {} 
-    # Iterate through blocks using the calculated dynamic step
     for col_idx in range(product_start_col, len(df.columns) - (cols_per_product - 1), cols_per_product):
-        # Pull name from row 3 (index 2). 
-        # Even if cells are merged, the value is stored in the first column of the merge.
         p_name = df.iloc[2, col_idx]
-        
         if pd.isna(p_name) or str(p_name).strip().lower() in ["none", "nan", ""]: 
-            p_name = f"Product at Col {get_column_letter(col_idx+1)}"
-        
-        # Store all indices belonging to this product block
+            p_name = f"Product {get_column_letter(col_idx+1)}"
         product_triplets[str(p_name).strip()] = list(range(col_idx, col_idx + cols_per_product))
 
-    # --- SIDEBAR FILTERS ---
-    regroup_mode = st.sidebar.toggle("Enable Question Regrouping", value=True)
-    all_p_names = list(product_triplets.keys())
-    selected_products = st.sidebar.multiselect("Select Products", all_p_names, default=all_p_names)
-    show_sig = st.sidebar.checkbox("Show Significance/Delta Columns for Products", value=True)
+    selected_products = st.sidebar.multiselect("Select Products", list(product_triplets.keys()), default=list(product_triplets.keys()))
+    show_sig = st.sidebar.checkbox("Show Significance Columns", value=True)
 
-    # --- UI FILTERING ---
+    # --- UI FILTERING (Simplified for brevity) ---
     raw_data_area = df.iloc[5:, [0, 1]].dropna(subset=[0])
-    ui_q_map = {}
-    for q_full in raw_data_area[0].unique():
-        if q_full in ["nan", "None", ""]: continue
-        display_name = get_question_root(q_full) if regroup_mode else q_full
-        metrics = df[df[0] == q_full][1].unique().tolist()
-        if display_name not in ui_q_map:
-            ui_q_map[display_name] = {"originals": [q_full], "metrics": set(metrics)}
-        else:
-            ui_q_map[display_name]["originals"].append(q_full)
-            ui_q_map[display_name]["metrics"].update(metrics)
+    selected_q_metrics = {q: set(df[df[0] == q][1].unique()) for q in raw_data_area[0].unique() if q not in ["nan", "None", ""]}
 
-    selected_q_metrics = {}
-    for display_q, data in ui_q_map.items():
-        with st.expander(f"❓ {display_q}"):
-            metrics_list = sorted([str(m) for m in data["metrics"] if pd.notna(m)])
-            gen_group = [m for m in metrics_list if m in GENERAL_METRICS]
-            mod_group = [m for m in metrics_list if m not in GENERAL_METRICS]
-            c1, c2, c3 = st.columns([1, 2, 2])
-            is_active = c1.checkbox("Keep", value=True, key=f"act_{display_q}")
-            if is_active:
-                m_gen_k, m_mod_k = f"mg_{display_q}", f"mm_{display_q}"
-                if m_gen_k not in st.session_state: st.session_state[m_gen_k] = gen_group
-                if m_mod_k not in st.session_state: st.session_state[m_mod_k] = mod_group
-                with c2:
-                    st.write("General")
-                    if st.button("Select All", key=f"allg_{display_q}"): st.session_state[m_gen_k] = gen_group
-                    if st.button("Unselect all", key=f"clrg_{display_q}"): st.session_state[m_gen_k] = []
-                    sel_gen = st.multiselect("Pick", gen_group, key=m_gen_k)
-                with c3:
-                    st.write("Modalities")
-                    if st.button("Select All", key=f"allm_{display_q}"): st.session_state[m_mod_k] = mod_group
-                    if st.button("Unselect all", key=f"clrm_{display_q}"): st.session_state[m_mod_k] = []
-                    sel_mod = st.multiselect("Pick", mod_group, key=m_mod_k)
-                for orig in data["originals"]:
-                    selected_q_metrics[orig] = set(sel_gen + sel_mod)
-
-    # --- 3. EXPORT ---
-    if st.button("🚀 Generate Templated Excel"):
+    # --- 3. EXPORT WITH DESIGNER STYLING ---
+    if st.button("🚀 Generate Beautiful Excel"):
         data_rows = []
         for idx, row in df.iloc[5:].iterrows():
             q_name, m_name = str(row[0]).strip(), str(row[1]).strip()
             if q_name in selected_q_metrics and m_name in selected_q_metrics[q_name]:
                 data_rows.append((idx, row))
 
-        if not data_rows:
-            st.error("No data selected.")
-        else:
-            # Construct final column selection
+        if data_rows:
             cols_to_keep = [0, 1]
-            # Add all benchmark columns
             benchmark_cols = list(range(bench_start_col, product_start_col))
             cols_to_keep.extend(benchmark_cols)
             
             final_product_cols = []
             for p in selected_products:
                 indices = product_triplets[p]
-                if show_sig:
-                    # Keep entire block (Value, Sig Letter, and all N benchmark sigs)
-                    final_product_cols.append({'name': p, 'indices': indices})
-                    cols_to_keep.extend(indices)
-                else:
-                    # Keep only the Value and the primary Sig Letter (first 2)
-                    kept = indices[:2]
-                    final_product_cols.append({'name': p, 'indices': kept})
-                    cols_to_keep.extend(kept)
+                kept = indices if show_sig else indices[:2]
+                final_product_cols.append({'name': p, 'indices': kept})
+                cols_to_keep.extend(kept)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Prepare data
                 final_rows = [df.iloc[i] for i in range(5)] + [r[1] for r in data_rows]
                 final_df = pd.DataFrame(final_rows)[cols_to_keep].reset_index(drop=True)
                 final_df.to_excel(writer, index=False, header=False, sheet_name='Report')
                 
                 workbook = writer.book
                 worksheet = writer.sheets['Report']
+                worksheet.freeze_panes(5, 2) # Freeze headers and first 2 columns
 
-                # Formats
-                header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-                merge_fmt = workbook.add_format({'valign': 'vcenter', 'align': 'left', 'border': 1, 'text_wrap': True})
+                # FORMATS
+                header_base = {'bold': True, 'bg_color': '#455A64', 'font_color': 'white', 'border': 1, 'border_color': BORDER_COLOR, 'align': 'center', 'valign': 'vcenter', 'font_name': 'Segoe UI'}
+                header_fmt = workbook.add_format(header_base)
+                
+                # Dynamic Pastel Formats for Column A
+                pastel_formats = [workbook.add_format({'bg_color': c, 'border': 1, 'border_color': BORDER_COLOR, 'valign': 'vcenter', 'text_wrap': True, 'font_name': 'Segoe UI', 'font_size': 9}) for c in PASTELS]
 
-                # A. Merge Headers in Row 3
-                # Benchmarks (2 columns each)
+                # --- A. HEADERS ---
                 for b_idx in range(num_benchmarks):
-                    b_col_idx = 2 + (b_idx * 2)
-                    b_name = df.iloc[2, b_col_idx]
-                    if pd.isna(b_name) or str(b_name).strip() == "None": b_name = f"Benchmark {b_idx+1}"
-                    worksheet.merge_range(2, b_col_idx, 2, b_col_idx + 1, str(b_name), header_fmt)
+                    b_col = 2 + (b_idx * 2)
+                    worksheet.merge_range(2, b_col, 2, b_col + 1, str(df.iloc[2, b_col]), header_fmt)
 
-                # Products (Dynamic number of columns)
-                current_col = product_start_col
+                curr_col = product_start_col
                 for p_info in final_product_cols:
                     n_cols = len(p_info['indices'])
+                    # Apply a specific format for product headers to give them a distinct outline
+                    p_header_fmt = workbook.add_format({**header_base, 'left': 2, 'right': 2})
                     if n_cols > 1:
-                        worksheet.merge_range(2, current_col, 2, current_col + n_cols - 1, p_info['name'], header_fmt)
+                        worksheet.merge_range(2, curr_col, 2, curr_col + n_cols - 1, p_info['name'], p_header_fmt)
                     else:
-                        worksheet.write(2, current_col, p_info['name'], header_fmt)
-                    current_col += n_cols
+                        worksheet.write(2, curr_col, p_info['name'], p_header_fmt)
+                    curr_col += n_cols
 
-                # B. Merge Question Names (Column A)
+                # --- B. DATA & MERGING ---
                 start_r = 5
-                for r in range(6, len(final_df)):
-                    if final_df.iloc[r, 0] != final_df.iloc[start_r, 0]:
-                        if r - 1 > start_r: worksheet.merge_range(start_r, 0, r - 1, 0, final_df.iloc[start_r, 0], merge_fmt)
-                        else: worksheet.write(start_r, 0, final_df.iloc[start_r, 0], merge_fmt)
-                        start_r = r
-                worksheet.merge_range(start_r, 0, len(final_df)-1, 0, final_df.iloc[start_r, 0], merge_fmt)
+                pastel_idx = 0
+                for r in range(5, len(final_df)):
+                    q_val = final_df.iloc[r, 0]
+                    is_last_in_group = (r == len(final_df) - 1 or final_df.iloc[r+1, 0] != q_val)
+                    
+                    # 1. Pastel Merging for Column A
+                    if is_last_in_group:
+                        fmt = pastel_formats[pastel_idx % len(PASTELS)]
+                        if r > start_r: worksheet.merge_range(start_r, 0, r, 0, q_val, fmt)
+                        else: worksheet.write(start_r, 0, q_val, fmt)
+                        pastel_idx += 1
+                        start_r = r + 1
 
-                # C. Final Data Application (Preserving Colors)
-                for target_r in range(5, len(final_df)):
-                    orig_row_idx = data_rows[target_r - 5][0]
+                    # 2. Row styling
+                    orig_row_idx = data_rows[r - 5][0]
                     for target_c in range(1, len(final_df.columns)):
                         orig_col_idx = cols_to_keep[target_c]
-                        val = final_df.iloc[target_r, target_c]
+                        val = final_df.iloc[r, target_c]
                         meta = cell_metadata.get((orig_row_idx, orig_col_idx), {"color": None, "is_percent": False})
                         
-                        is_pct = meta["is_percent"] or (str(final_df.iloc[target_r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float)))
+                        # Border logic: Dotted separator if not the last row of a group
+                        border_style = 1 if is_last_in_group else 3 # 3 is 'dash-dot' or similar in xlsxwriter
                         
-                        cell_fmt_dict = {'border': 1}
-                        if meta["color"]: cell_fmt_dict['bg_color'] = meta["color"]
-                        if is_pct: cell_fmt_dict['num_format'] = '0%'
+                        cell_style = {
+                            'border': 1, 
+                            'border_color': BORDER_COLOR,
+                            'bottom': 1 if is_last_in_group else 4, # 4 is dotted
+                            'font_name': 'Segoe UI',
+                            'font_size': 9
+                        }
                         
-                        applied_fmt = workbook.add_format(cell_fmt_dict)
-                        worksheet.write(target_r, target_c, val if pd.notna(val) else "", applied_fmt)
+                        # Product block outlining (thick borders on left/right)
+                        is_product_col = target_c >= product_start_col
+                        if is_product_col:
+                            # Find if this is start or end of a product block
+                            block_rel_pos = (target_c - product_start_col) % (len(final_product_cols[0]['indices']))
+                            if block_rel_pos == 0: cell_style['left'] = 2
+                            if block_rel_pos == len(final_product_cols[0]['indices']) - 1: cell_style['right'] = 2
 
-            st.success(f"✅ Generated! Product blocks calculated as {cols_per_product} columns wide.")
-            st.download_button("📥 Download Excel", output.getvalue(), f"Formatted_Report.xlsx")
+                        if meta["color"]: cell_style['bg_color'] = meta["color"]
+                        if meta["is_percent"] or (str(final_df.iloc[r, 1]) not in GENERAL_METRICS and isinstance(val, (int, float))):
+                            cell_style['num_format'] = '0%'
+                        
+                        worksheet.write(r, target_c, val if pd.notna(val) else "", workbook.add_format(cell_style))
+
+                # Auto-adjust column widths
+                worksheet.set_column(0, 0, 30)
+                worksheet.set_column(1, 1, 20)
+                worksheet.set_column(2, len(final_df.columns)-1, 10)
+
+            st.success("✅ Designer Report Generated!")
+            st.download_button("📥 Download Styled Excel", output.getvalue(), "Designer_Report.xlsx")
