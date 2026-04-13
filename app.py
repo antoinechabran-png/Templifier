@@ -14,6 +14,7 @@ PASTELS = ['#E3F2FD', '#F3E5F5', '#E8F5E9', '#FFF3E0', '#FCE4EC'] # Soft Blue, P
 SOFT_BORDER = '#B0BEC5' # Muted blue-grey
 
 def get_question_root(q_text):
+    # Extracts the "Q-03" or "S-01" part from "Q-03- Overall Likeness"
     match = re.match(r"^(Q-\d+|S-\d+)", str(q_text))
     return match.group(1) if match else str(q_text)
 
@@ -159,18 +160,29 @@ if uploaded_file is not None:
 
                 # B. Data with Outlines and Dotted Separators
                 start_r = 5
-                pastel_idx = 0
+                pastel_idx = -1
+                last_root = None
+
                 for r in range(5, len(final_df)):
-                    q_val = final_df.iloc[r, 0]
-                    # Logic: is this the last row of a question group?
-                    is_last = (r == len(final_df) - 1 or final_df.iloc[r+1, 0] != q_val)
+                    q_val = str(final_df.iloc[r, 0])
+                    root = get_question_root(q_val)
                     
-                    # 1. Pastel Merging for Column A
-                    if is_last:
-                        fmt = pastel_fmts[pastel_idx % len(PASTELS)]
-                        if r > start_r: worksheet.merge_range(start_r, 0, r, 0, q_val, fmt)
-                        else: worksheet.write(start_r, 0, q_val, fmt)
-                        pastel_idx += 1
+                    # Logic: is this the last row of a specific question text group?
+                    is_last_text = (r == len(final_df) - 1 or str(final_df.iloc[r+1, 0]) != q_val)
+                    
+                    # 1. Pastel Logic for Column A (Consistent per Root)
+                    if is_last_text:
+                        if root != last_root:
+                            pastel_idx += 1
+                            last_root = root
+                        
+                        current_pastel = pastel_fmts[pastel_idx % len(PASTELS)]
+                        
+                        if r > start_r: 
+                            worksheet.merge_range(start_r, 0, r, 0, q_val, current_pastel)
+                        else: 
+                            worksheet.write(start_r, 0, q_val, current_pastel)
+                        
                         start_r = r + 1
 
                     # 2. Style each cell in the row
@@ -184,7 +196,7 @@ if uploaded_file is not None:
                         cell_style = {
                             'border': 1, 
                             'border_color': SOFT_BORDER,
-                            'bottom': 1 if is_last else 4 # 4 is Dotted
+                            'bottom': 1 if is_last_text else 4 # 4 is Dotted
                         }
                         
                         # Product block outlining (Thick edges)
@@ -203,5 +215,5 @@ if uploaded_file is not None:
                 worksheet.set_column(0, 0, 30)
                 worksheet.set_column(1, 1, 20)
 
-            st.success("✅ Beautifully Formatted Report Generated!")
-            st.download_button("📥 Download Excel", output.getvalue(), f"Formatted_Report_{selected_sheet}.xlsx")
+            st.success("✅ Grouped Color Report Generated!")
+            st.download_button("📥 Download Excel", output.getvalue(), f"Styled_Report_{selected_sheet}.xlsx")
